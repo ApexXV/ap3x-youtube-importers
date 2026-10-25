@@ -1,0 +1,19 @@
+# /home/ap3x/.config/systemd/user/youtube-playlist-import.service
+[Unit]
+Description=Archive requested YouTube playlists into Plex
+After=network-online.target youtube-channel-import.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ap3x/AP3X_YOUTUBE_PLAYLISTS_20261014
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/ap3x/.deno/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /home/ap3x/AP3X_YOUTUBE_PLAYLISTS_20261014/playlist_archive_import.py run --yt-dlp /home/ap3x/.local/share/youtube-import/yt-dlp-2026.08.19 --cookies /home/ap3x/.local/share/youtube-import/auth/youtube.cookies.txt
+TimeoutStartSec=infinity
+Restart=no
+StandardOutput=append:/home/ap3x/.local/share/youtube-series-playlist-import/service.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target

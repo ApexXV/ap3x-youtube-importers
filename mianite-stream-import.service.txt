@@ -1,0 +1,17 @@
+# /home/ap3x/.config/systemd/user/mianite-stream-import.service
+[Unit]
+Description=Archive CaptainSparklez 2 Mianite Season 2 full streams into Plex Season 03
+After=network-online.target youtube-channel-import.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ap3x/AP3X_MIANITE_STREAMS_20261014
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/ap3x/.deno/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/python3 /home/ap3x/AP3X_MIANITE_STREAMS_20261014/mianite_stream_import.py check --yt-dlp /home/ap3x/.local/share/youtube-import/yt-dlp-2026.08.19 --cookies /home/ap3x/.local/share/youtube-import/auth/youtube.cookies.txt
+ExecStart=/usr/bin/python3 /home/ap3x/AP3X_MIANITE_STREAMS_20261014/mianite_stream_import.py run --yt-dlp /home/ap3x/.local/share/youtube-import/yt-dlp-2026.08.19 --cookies /home/ap3x/.local/share/youtube-import/auth/youtube.cookies.txt
+TimeoutStartSec=infinity
+Restart=no
+StandardOutput=append:/home/ap3x/.local/share/mianite-s2-full-stream-import/service.log
+StandardError=inherit

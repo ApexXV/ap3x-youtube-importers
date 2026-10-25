@@ -1,0 +1,15 @@
+# /home/ap3x/.config/systemd/user/artist-archive-import.service
+[Unit]
+Description=Update selected artists' releases in Plex Music
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ap3x/AP3X_LOFI_GIRL_20261011
+ExecStart=/home/ap3x/AP3X_LOFI_GIRL_20261011/run_pipeline.sh
+TimeoutStartSec=infinity
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=append:/home/ap3x/.local/share/ap3x-lofi-girl/import-state/pipeline.log
+StandardError=append:/home/ap3x/.local/share/ap3x-lofi-girl/import-state/pipeline.log
