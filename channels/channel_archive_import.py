@@ -55,6 +55,44 @@ LOCAL_ZONE = ZoneInfo("America/New_York")
 class ImportErrorSafe(RuntimeError):
     pass
 
+# ---- Wall progress (optional) ---------------------------------------------
+# Live status for the Command 57 wall, written through ap3x_progress.py from
+# ap3x-wall-data-collectors (installed to ~/.local/lib/ap3x). It records only a
+# phase word and numbers. Every call is guarded: a missing helper, a write
+# error, or AP3X_PROGRESS=off leaves the import exactly as it was.
+PROGRESS_LIB = Path("/home/ap3x/.local/lib/ap3x")
+PROGRESS = None
+
+
+def start_progress(source: str, state_root: Path, eligible: int | None = None) -> None:
+    global PROGRESS
+    PROGRESS = None
+    if os.environ.get("AP3X_PROGRESS", "").lower() == "off":
+        return
+    try:
+        if str(PROGRESS_LIB) not in sys.path:
+            sys.path.append(str(PROGRESS_LIB))
+        from ap3x_progress import ProgressEvent
+        PROGRESS = ProgressEvent(state_root, source=source, eligible=eligible)
+    except Exception:
+        PROGRESS = None
+
+
+def progress(method: str, *args, **kwargs) -> None:
+    if PROGRESS is None:
+        return
+    try:
+        getattr(PROGRESS, method)(*args, **kwargs)
+    except Exception:
+        pass
+
+
+def progress_stopped(error: BaseException) -> None:
+    """Classify a stop for the wall (bot_or_429, unavailable, ...) without its text."""
+    message = str(error)
+    kind = classify_error(message)
+    progress("fail", kind if kind != "unknown" else "low_space" if "free space" in message else "stopped")
+
 
 def atomic_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -554,6 +592,7 @@ def monitor_command(cmd: list[str], log: Path, *, reserve: int, check_window: bo
         try:
             while process.poll() is None:
                 time.sleep(10)
+                progress("ytdlp_log", tail(log, 4000))
                 if free_bytes() < reserve:
                     reason = "low_space"
                 elif check_window and (quiet_window() or music_active()):
@@ -616,6 +655,7 @@ def fetch_video(source: dict, video_id: str, existing_old: Path | None,
         else:
             cmd.extend(["-f", "bv*+ba/b", "--merge-output-format", "mkv"])
         cmd.append(url)
+        progress("phase", "downloading")
         delays = (0, 60, 120)
         last_log = None
         for attempt, delay in enumerate(delays, 1):
@@ -661,6 +701,7 @@ def fetch_video(source: dict, video_id: str, existing_old: Path | None,
     if reason := shorts_evidence(info):
         record_short_skip(source, video_id, reason, title=info.get("title"))
         raise ImportErrorSafe(f"SHORTS: {video_id} excluded after staged metadata validation")
+    progress("phase", "verifying")
     verify_media(media, args.ffprobe)
     if downloaded:
         atomic_json(completion, {"id": video_id, "media_name": media.name,
@@ -701,6 +742,7 @@ def target_files(stage: Path, media: Path, target: Path) -> list[tuple[Path, Pat
 
 def promote(source: dict, video_id: str, media: Path, info: dict,
             args: argparse.Namespace) -> dict:
+    progress("phase", "publishing")
     stage = media.parent
     aired = video_date(info)
     season = int(aired[:4]) if aired else 0
@@ -796,7 +838,7 @@ def scan_source_for_rescan(source: dict, args: argparse.Namespace) -> list[str]:
 def process_source(source: dict, ids: list[str], args: argparse.Namespace,
                    present_new: dict[str, Path], present_old: dict[str, Path],
                    imported: int) -> tuple[int, bool]:
-    for video_id in ids:
+    for index, video_id in enumerate(ids, 1):
         if (STATE_ROOT / "skipped-shorts" / f"{video_id}.json").exists():
             continue
         record_file = STATE_ROOT / "records" / f"{video_id}.json"
@@ -811,12 +853,16 @@ def process_source(source: dict, ids: list[str], args: argparse.Namespace,
             continue
         if (STATE_ROOT / "unavailable" / f"{video_id}.json").exists():
             continue
+        progress("item", position=index, eligible=len(ids),
+                 completed=sum((STATE_ROOT / "records" / f"{other}.json").exists() for other in ids))
+        progress("phase", "waiting")
         gate(wait=True)
         try:
             while True:
                 try:
                     with music_lock_wait():
                         gate(wait=False)
+                        progress("phase", "probing")
                         preflight_video(source, video_id, args)
                         media, info = fetch_video(source, video_id, present_old.get(video_id), args)
                         record = promote(source, video_id, media, info, args)
@@ -828,6 +874,7 @@ def process_source(source: dict, ids: list[str], args: argparse.Namespace,
                     if not str(error).startswith("DEFERRED:"):
                         raise
                     print(error, flush=True)
+                    progress("phase", "waiting")
                     gate(wait=True)
         except ImportErrorSafe as error:
             if str(error).startswith(("UNAVAILABLE:", "LIVE:", "SHORTS:")):
@@ -865,6 +912,8 @@ def run(args: argparse.Namespace, sources: list[dict]) -> int:
     (STAGE_ROOT / ".plexignore").write_text("*\n", encoding="utf-8")
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
     with locked(STATE_ROOT / "channel-import.lock"):
+        start_progress("channels", STATE_ROOT)
+        progress("phase", "scanning")
         run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}-{time.time_ns() % 1_000_000_000}"
         stop_after_source = getattr(args, "stop_after_source", None)
         full_source_scope = not bool(getattr(args, "source", None) or stop_after_source)
@@ -891,6 +940,7 @@ def run(args: argparse.Namespace, sources: list[dict]) -> int:
             catalogs: dict[str, list[str]] = {}
             raw_before: dict[str, set[str]] = {}
             for source in active_sources:
+                progress("phase", "scanning")
                 ids = scan_source_for_run(source, args, probed)
                 catalogs[source["slug"]] = ids
                 catalog = read_json(STATE_ROOT / "catalog" / f"{source['slug']}.json")
@@ -1083,12 +1133,15 @@ def main(argv: list[str] | None = None) -> int:
                   f"{sum(v in new for v in ids)} in TV, "
                   f"{sum(v in old and v not in new for v in ids)} reusable from old library")
         return 0
-    return run(args, sources)
+    result = run(args, sources)
+    progress("done")
+    return result
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (ImportErrorSafe, OSError, subprocess.TimeoutExpired) as error:
+        progress_stopped(error)
         print(error, file=sys.stderr, flush=True)
         raise SystemExit(2)

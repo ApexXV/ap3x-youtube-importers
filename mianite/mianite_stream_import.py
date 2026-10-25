@@ -341,6 +341,7 @@ def owned_record_file(path: Path) -> bool:
 
 def promote(item: dict, media: Path, info: dict, inventory: dict,
             digest: str, args: argparse.Namespace) -> dict:
+    base.progress("phase", "publishing")
     ensure_season(inventory, digest)
     target = target_path(item, media)
     pending_file = pending_path(item)
@@ -444,6 +445,8 @@ def run(args: argparse.Namespace, inventory: dict, digest: str) -> int:
     (STAGE_ROOT / ".plexignore").write_text("*\n", encoding="utf-8")
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
     with base.locked(CHANNEL_LOCK), base.locked(PLAYLIST_LOCK), base.locked(RUN_LOCK):
+        base.start_progress("mianite", STATE_ROOT, eligible=len(items))
+        base.progress("phase", "scanning")
         check_services_paused()
         check_jjt_handoff()
         while True:
@@ -459,6 +462,7 @@ def run(args: argparse.Namespace, inventory: dict, digest: str) -> int:
                 if not str(error).startswith("DEFERRED:"):
                     raise
                 print(error, flush=True)
+                base.progress("phase", "waiting")
                 time.sleep(60)
         while True:
             try:
@@ -467,12 +471,14 @@ def run(args: argparse.Namespace, inventory: dict, digest: str) -> int:
                 with base.music_lock_wait():
                     check_services_paused()
                     check_jjt_handoff()
+                    base.progress("phase", "probing")
                     base.probe_access(items[0]["id"], args)
                 break
             except base.ImportErrorSafe as error:
                 if not str(error).startswith("DEFERRED:"):
                     raise
                 print(error, flush=True)
+                base.progress("phase", "waiting")
                 time.sleep(60)
         present = base.media_ids(base.TV_ROOT)
         old = base.media_ids(base.OLD_ROOT)
@@ -482,6 +488,7 @@ def run(args: argparse.Namespace, inventory: dict, digest: str) -> int:
             if path.is_file():
                 verify_record(item)
                 continue
+            base.progress("item", position=item["position"], completed=sum(record_path(other).is_file() for other in items))
             while True:
                 try:
                     check_services_paused()
@@ -503,6 +510,7 @@ def run(args: argparse.Namespace, inventory: dict, digest: str) -> int:
                     if not str(error).startswith("DEFERRED:"):
                         raise
                     print(error, flush=True)
+                    base.progress("phase", "waiting")
                     time.sleep(60)
             if args.limit and imported >= args.limit:
                 print(f"LIMIT {args.limit} reached; staged queue is resumable", flush=True)
@@ -521,8 +529,10 @@ def run(args: argparse.Namespace, inventory: dict, digest: str) -> int:
                 if not str(error).startswith("DEFERRED:"):
                     raise
                 print(error, flush=True)
+                base.progress("phase", "waiting")
                 time.sleep(60)
         status = write_status(items, limited=False, terminal_rescan_verified=True)
+        base.progress("done")
         print(f"{status['status'].upper()}: {status['present']}/25 Mianite full streams", flush=True)
     return 0
 
@@ -652,5 +662,6 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (base.ImportErrorSafe, OSError, subprocess.TimeoutExpired, ValueError, ET.ParseError) as error:
+        base.progress_stopped(error)
         print(error, file=sys.stderr, flush=True)
         raise SystemExit(2)
