@@ -56,6 +56,44 @@ TRANSIENT_RE = re.compile(r"HTTP Error 5\d\d|timed out|connection reset|temporar
 class ImportErrorSafe(RuntimeError):
     pass
 
+# ---- Wall progress (optional) ---------------------------------------------
+# Live status for the Command 57 wall, written through ap3x_progress.py from
+# ap3x-wall-data-collectors (installed to ~/.local/lib/ap3x). It records only a
+# phase word and numbers. Every call is guarded: a missing helper, a write
+# error, or AP3X_PROGRESS=off leaves the import exactly as it was.
+PROGRESS_LIB = Path("/home/ap3x/.local/lib/ap3x")
+PROGRESS = None
+
+
+def start_progress(source: str, state_root: Path, eligible: int | None = None) -> None:
+    global PROGRESS
+    PROGRESS = None
+    if os.environ.get("AP3X_PROGRESS", "").lower() == "off":
+        return
+    try:
+        if str(PROGRESS_LIB) not in sys.path:
+            sys.path.append(str(PROGRESS_LIB))
+        from ap3x_progress import ProgressEvent
+        PROGRESS = ProgressEvent(state_root, source=source, eligible=eligible)
+    except Exception:
+        PROGRESS = None
+
+
+def progress(method: str, *args, **kwargs) -> None:
+    if PROGRESS is None:
+        return
+    try:
+        getattr(PROGRESS, method)(*args, **kwargs)
+    except Exception:
+        pass
+
+
+def progress_stopped(error: BaseException) -> None:
+    """Classify a stop for the wall (bot_or_429, unavailable, ...) without its text."""
+    message = str(error)
+    kind = classify_error(message)
+    progress("fail", kind if kind != "unknown" else "low_space" if "free space" in message else "stopped")
+
 
 # A source playlist becomes a TV show, except the explicitly reviewed splits.
 # Distinct shows retain playlist positions; duplicate video IDs are hardlinked.
@@ -570,6 +608,7 @@ def monitor_command(command: list[str], log: Path) -> tuple[int, str]:
         try:
             while process.poll() is None:
                 time.sleep(10)
+                progress("ytdlp_log", tail(log, 4000))
                 if free_bytes() < RESERVE_BYTES:
                     reason = "low_space"
                 elif quiet_window() or music_active():
@@ -686,6 +725,7 @@ def fetch_video(video_id: str, existing: Path | None, args: argparse.Namespace) 
     else:
         # Legacy/channel sidecars may lack portrait dimensions and cannot
         # certify that this video is not a Short. Probe them afresh first.
+        progress("phase", "probing")
         info = extract_metadata(video_id, args)
         if is_short(info):
             atomic_json(STATE_ROOT / "shorts" / f"{video_id}.json",
@@ -728,6 +768,7 @@ def fetch_video(video_id: str, existing: Path | None, args: argparse.Namespace) 
         else:
             command += ["-f", "bv*+ba/b", "--merge-output-format", "mkv"]
         command.append(f"https://www.youtube.com/watch?v={video_id}")
+        progress("phase", "downloading")
         for attempt, delay in enumerate((0, 60, 120, 240), 1):
             if delay:
                 time.sleep(delay)
@@ -761,6 +802,7 @@ def fetch_video(video_id: str, existing: Path | None, args: argparse.Namespace) 
     media = staged_media(stage, video_id)
     if media is None:
         raise ImportErrorSafe(f"STOP: missing media after fetch: {video_id}")
+    progress("phase", "verifying")
     verify_media(media, args.ffprobe)
     return media, info
 
@@ -880,6 +922,7 @@ def verify_record_files(record: dict, *, full_hash: bool = False) -> None:
 
 def promote(item: dict, source: dict, media: Path, info: dict,
             args: argparse.Namespace) -> dict:
+    progress("phase", "publishing")
     stage = media.parent
     expected = safe_target(item, media)
     pending_file = pending_path(item)
@@ -1007,7 +1050,10 @@ def run(args: argparse.Namespace, sources: list[dict]) -> int:
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
     items = planned_placements(sources)
     with locked(STATE_ROOT / "playlist-import.lock"):
+        start_progress("playlists", STATE_ROOT, eligible=len(items))
+        progress("phase", "waiting")
         gate(wait=True)
+        progress("phase", "scanning")
         # Source scans and a format probe happen before the first media fetch.
         for source in sources:
             while True:
@@ -1047,7 +1093,7 @@ def run(args: argparse.Namespace, sources: list[dict]) -> int:
         old = media_ids(OLD_ROOT)
         imported = 0
         by_source = {source["playlist_id"]: source for source in sources}
-        for item in items:
+        for index, item in enumerate(items, 1):
             record_file = record_path(item)
             if record_file.is_file():
                 verify_record_files(read_json(record_file))
@@ -1055,6 +1101,7 @@ def run(args: argparse.Namespace, sources: list[dict]) -> int:
             if (STATE_ROOT / "unavailable" / f"{item['id']}.json").is_file() or \
                     (STATE_ROOT / "shorts" / f"{item['id']}.json").is_file():
                 continue
+            progress("item", position=index, completed=sum(record_path(other).is_file() for other in items))
             while True:
                 try:
                     channel_queue_finished()
@@ -1072,6 +1119,7 @@ def run(args: argparse.Namespace, sources: list[dict]) -> int:
                     message = str(error)
                     if message.startswith("DEFERRED:"):
                         print(message, flush=True)
+                        progress("phase", "waiting")
                         time.sleep(60)
                         gate(wait=True)
                         continue
@@ -1099,6 +1147,7 @@ def run(args: argparse.Namespace, sources: list[dict]) -> int:
                     print(error, flush=True)
                     time.sleep(60)
         status = write_status(items, limited=False)
+        progress("done")
         print(f"{status['status'].upper()}: {status['present']}/{status['placements']} placements; "
               f"{status['unavailable']} unavailable, {status['shorts_excluded']} Shorts excluded", flush=True)
     return 0
@@ -1171,5 +1220,6 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (ImportErrorSafe, OSError, subprocess.TimeoutExpired, ValueError) as error:
+        progress_stopped(error)
         print(error, file=sys.stderr, flush=True)
         raise SystemExit(2)
