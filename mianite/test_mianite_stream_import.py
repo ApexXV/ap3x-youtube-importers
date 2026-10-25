@@ -72,20 +72,41 @@ class InventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(base.ImportErrorSafe, "not fully stopped"):
                 stream.check_services_paused()
 
-    def test_only_verified_jjt_boundary_allows_handoff(self):
+    def test_only_validated_jjt_user_skip_allows_handoff(self):
+        """The 267/274 JJtCool user skip (not a completed boundary) is the handoff, after offline validation."""
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
             state = Path(folder)
-            payload = {"stopped_after_source": "jjt-cool", "source_boundary_verified": True,
-                       "handoff_ready": True, "full_source_scope": False,
-                       "terminal_rescan_verified": False, "unresolved": 0,
-                       "unavailable": 0, "sources": {"jjt-cool": 274},
-                       "present": 274, "eligible_total": 274}
-            with mock.patch.object(stream, "CHANNEL_STATE", state):
+            marker, validator = state / "jjt-cool-skip.json", state / "jjt_skip_handoff.py"
+            marker.write_text("{}", encoding="utf-8")
+            validator.write_text("", encoding="utf-8")
+            payload = {"stopped_after_source": "jjt-cool", "status": "partial",
+                       "source_boundary_verified": False, "handoff_ready": False,
+                       "full_source_scope": False, "terminal_rescan_verified": False}
+            verdict = {"status": "valid_user_skip", "source": "jjt-cool", "catalog_eligible_count": 274,
+                       "completed_record_count": 267, "omitted_count": 7}
+
+            def validated(result):
+                return mock.Mock(returncode=0, stdout=json.dumps(result))
+
+            with mock.patch.object(stream, "CHANNEL_STATE", state), \
+                    mock.patch.object(stream, "SKIP_MARKER", marker), \
+                    mock.patch.object(stream, "SKIP_VALIDATOR", validator):
                 (state / "run-status.json").write_text(json.dumps(payload), encoding="utf-8")
-                stream.check_jjt_handoff()
-                payload["unresolved"] = 1
+                with mock.patch.object(stream.subprocess, "run", return_value=validated(verdict)):
+                    stream.check_jjt_handoff()
+                with mock.patch.object(stream.subprocess, "run", return_value=validated({**verdict, "completed_record_count": 266})):
+                    with self.assertRaisesRegex(base.ImportErrorSafe, "unexpected scope"):
+                        stream.check_jjt_handoff()
+                with mock.patch.object(stream.subprocess, "run", return_value=mock.Mock(returncode=1, stdout="")):
+                    with self.assertRaisesRegex(base.ImportErrorSafe, "failed offline validation"):
+                        stream.check_jjt_handoff()
+                # A run that claims a completed boundary is not the owner's skip.
+                (state / "run-status.json").write_text(json.dumps({**payload, "handoff_ready": True}), encoding="utf-8")
+                with self.assertRaisesRegex(base.ImportErrorSafe, "skip is not verified"):
+                    stream.check_jjt_handoff()
+                marker.unlink()
                 (state / "run-status.json").write_text(json.dumps(payload), encoding="utf-8")
-                with self.assertRaisesRegex(base.ImportErrorSafe, "has not passed verification"):
+                with self.assertRaisesRegex(base.ImportErrorSafe, "skip is not verified"):
                     stream.check_jjt_handoff()
 
 
